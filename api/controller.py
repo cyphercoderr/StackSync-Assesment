@@ -1,16 +1,8 @@
-# api/controller.py
 """
 Controller / orchestrator for executing user scripts.
 
-Responsibilities:
-- call validation.validate_script(...)
-- wrap the user script into a small harness that prints a single JSON RESULT marker
-  so we can separate the main() return from user print() output
-- execute the harness using a runner (for now a subprocess fallback)
-- parse the outputs and return a normalized dict:
-    {"result": <json-serializable>, "stdout": "<captured print output>", "error": "<error message or None>"}
-
-Note: Replace the _local_runner(...) implementation with an nsjail invocation later.
+Tries to use a remote runner service (RUNNER_URL) and falls back to local execution
+if the runner is unreachable. Keeps the same harness semantics and markers.
 """
 
 import tempfile
@@ -19,6 +11,8 @@ import sys
 import os
 import json
 from typing import Tuple, Optional, Dict
+
+import requests
 
 from api.validation import validate_script
 
@@ -29,17 +23,16 @@ _RESULT_MARKER = "<<<__PY_RESULT__>>>"
 DEFAULT_TIMEOUT_SECS = 5
 DEFAULT_MEMORY_MB = 128  # placeholder; not enforced by subprocess fallback
 
+# Runner URL (container DNS / service name). When using docker-compose this resolves to the runner service.
+RUNNER_URL = os.environ.get("RUNNER_URL", "http://sandbox-runner:5000/run")
+REQUEST_TIMEOUT = int(os.environ.get("RUNNER_REQUEST_TIMEOUT", "10"))
+
 
 def _build_harness(script: str) -> str:
     """
-    Returns Python source text that:
-    - runs the user-provided script
-    - calls main()
-    - prints the result as a single line with a unique marker
-    - leaves other print() output intact (so it shows in stdout)
+    Build the harness (same semantics as before).
     """
-    # We intentionally avoid capturing/redirecting print() so that user's prints go to stdout.
-    harness = f"""
+    harness = f"""# coding: utf-8
 import json, sys
 # --- user script ---
 {script}
@@ -48,14 +41,21 @@ import json, sys
 def __run_and_emit_result():
     try:
         result = main()
-    except Exception as e:
-        # print error to stderr (so it's clearly an error)
-        print("Exception in main():", file=sys.stderr)
-        raise
+    except Exception:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
 
-    # Ensure JSON serializable; if not, we still attempt to dump and may raise
-    marker = "{_RESULT_MARKER}"
-    print(marker + json.dumps(result, default=lambda o: str(o)))
+    # Ensure result is JSON-serializable; fail loudly otherwise
+    try:
+        payload = json.dumps(result)
+    except (TypeError, ValueError) as e:
+        err = {{ "error": "result_not_json_serializable", "detail": str(e) }}
+        # emit a recognizable error marker on stderr (runner may forward this)
+        print("{_RESULT_MARKER}" + json.dumps({{"__error__": str(e)}}))
+        sys.exit(2)
+
+    print("{_RESULT_MARKER}" + payload)
 
 if __name__ == "__main__":
     __run_and_emit_result()
@@ -65,13 +65,8 @@ if __name__ == "__main__":
 
 def _local_runner(harness_source: str, timeout: int = DEFAULT_TIMEOUT_SECS) -> Tuple[Optional[str], str, str, int]:
     """
-    Simple local runner using the current Python interpreter to run the harness_source.
-
-    Returns tuple: (result_json_text_or_None, captured_stdout, captured_stderr, return_code)
-
-    NOTE: This is a development fallback. Replace with an nsjail runner for production.
+    Local fallback runner using current python interpreter (unchanged behavior).
     """
-    # write harness to a temp file
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False)
     try:
         tmp.write(harness_source)
@@ -88,8 +83,7 @@ def _local_runner(harness_source: str, timeout: int = DEFAULT_TIMEOUT_SECS) -> T
             universal_newlines=True,
             timeout=timeout,
         )
-    except subprocess.TimeoutExpired as e:
-        # Kill / cleanup - subprocess.run already killed child, but ensure file removal
+    except subprocess.TimeoutExpired:
         try:
             os.unlink(tmp_path)
         except Exception:
@@ -100,39 +94,61 @@ def _local_runner(harness_source: str, timeout: int = DEFAULT_TIMEOUT_SECS) -> T
     stderr = proc.stderr or ""
     return_code = proc.returncode
 
-    # cleanup file
     try:
         os.unlink(tmp_path)
     except Exception:
         pass
 
-    # Attempt to extract the JSON result marker from stdout
     result_json_text = None
     for line in stdout.splitlines():
         if line.startswith(_RESULT_MARKER):
             result_json_text = line[len(_RESULT_MARKER):]
-            # don't break: later markers override earlier ones (but unlikely)
+    return result_json_text, stdout, stderr, return_code
+
+
+def _remote_runner(harness_source: str, timeout: int = DEFAULT_TIMEOUT_SECS) -> Tuple[Optional[str], str, str, int]:
+    """
+    Send the harness to the remote runner service and return (result_json_text, stdout, stderr, return_code).
+    Expects the runner to return JSON with keys: stdout, stderr, return_code.
+    """
+    payload = {"harness": harness_source, "timeout": timeout}
+    resp = requests.post(RUNNER_URL, json=payload, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    body = resp.json()
+    stdout = body.get("stdout", "")
+    stderr = body.get("stderr", "")
+    return_code = int(body.get("return_code", 1))
+    result_json_text = None
+    for line in stdout.splitlines():
+        if line.startswith(_RESULT_MARKER):
+            result_json_text = line[len(_RESULT_MARKER):]
     return result_json_text, stdout, stderr, return_code
 
 
 def execute_script(script: str, timeout: int = DEFAULT_TIMEOUT_SECS, memory_mb: int = DEFAULT_MEMORY_MB) -> Dict:
     """
-    High-level orchestration: validate, run in sandbox/runner, parse result.
-    Returns a dict with keys:
-      - result: the deserialized JSON returned by main() (or None on error)
-      - stdout: captured user print() output (string)
-      - error: error message string or None
+    Validate script, attempt remote runner, fallback to local runner, parse, and return structure.
     """
     ok, err = validate_script(script)
     if not ok:
         return {"result": None, "stdout": "", "error": err}
 
     harness = _build_harness(script)
-    # TODO: swap this local runner call with a call into the nsjail runner module,
-    # e.g. runner.run_in_ns_jail(harness, timeout=timeout, memory_mb=memory_mb)
-    result_json_text, full_stdout, full_stderr, return_code = _local_runner(harness, timeout=timeout)
 
-    # Separate printed stdout (excluding the result marker line(s))
+    # Try remote runner first (if reachable). If RUNNER_URL points to nowhere requests will raise.
+    try:
+        result_json_text, full_stdout, full_stderr, return_code = _remote_runner(harness, timeout=timeout)
+    except Exception as e:
+        # Remote runner unavailable: log the exception as part of stderr fallback note and run locally.
+        fallback_note = f"[runner-unavailable] {e}"
+        result_json_text, full_stdout, full_stderr, return_code = _local_runner(harness, timeout=timeout)
+        # Prepend fallback note to stderr so caller sees remote failure reason (keeps behavior observable)
+        if full_stderr:
+            full_stderr = fallback_note + "\n" + full_stderr
+        else:
+            full_stderr = fallback_note
+
+    # Collect printed stdout excluding _RESULT_MARKER lines
     printed_lines = []
     for line in full_stdout.splitlines():
         if not line.startswith(_RESULT_MARKER):
@@ -140,23 +156,17 @@ def execute_script(script: str, timeout: int = DEFAULT_TIMEOUT_SECS, memory_mb: 
     printed_stdout = "\n".join(printed_lines)
 
     if result_json_text is None:
-        # No result marker found -> error
-        # Use stderr + return code to form the error message
+        # No JSON result; report helpful error using stderr or return code
+        if full_stderr and full_stderr.strip():
+            return {"result": None, "stdout": printed_stdout, "error": full_stderr.strip()}
         if return_code == -1:
-            error_msg = full_stderr or f"Execution timed out after {timeout} seconds."
-        else:
-            # If stderr is present, surface it; otherwise provide a generic message
-            if full_stderr.strip():
-                error_msg = full_stderr.strip()
-            else:
-                error_msg = f"Script did not print a result marker. Return code: {return_code}."
-        return {"result": None, "stdout": printed_stdout, "error": error_msg}
+            return {"result": None, "stdout": printed_stdout, "error": f"Execution timed out after {timeout} seconds."}
+        return {"result": None, "stdout": printed_stdout, "error": f"Script did not produce a JSON result (return code {return_code})."}
 
-    # Try to decode result_json_text
+    # Parse JSON result
     try:
         result_obj = json.loads(result_json_text)
     except Exception as e:
         return {"result": None, "stdout": printed_stdout, "error": f"Returned value is not valid JSON: {e}"}
 
-    # Successful run
     return {"result": result_obj, "stdout": printed_stdout, "error": None}

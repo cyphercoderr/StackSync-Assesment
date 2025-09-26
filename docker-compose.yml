@@ -1,0 +1,21 @@
+version: "3.8"
+services:
+  api:
+    build:
+      context: .
+      dockerfile: api.Dockerfile
+    container_name: api
+    environment:
+      - RUNNER_URL=http://sandbox-runner:5000/run
+    ports:
+      - "8081:8081"
+    depends_on:
+      - sandbox-runner
+
+  sandbox-runner:
+    build:
+      context: .
+      dockerfile: sandbox.Dockerfile
+    container_name: sandbox-runner
+    ports:
+      - "5000:5000"
