@@ -1,4 +1,4 @@
-# Python Script Execution Service
+# 🐍 Python Script Execution Service
 
 ## 📌 Overview
 
@@ -13,12 +13,16 @@ It is designed to meet the following business requirements:
 - Return results in a structured JSON response:
   ```json
   {
-    "result": {...},   # JSON returned by main()
-    "stdout": "...",   # Print output from script execution
-    "error": null      # Or error details if failed
+    "result": {...},   // JSON returned by main()
+    "stdout": "...",   // Print output from script execution
+    "error": null      // Or error details if failed
   }
+````
 
-## Architecture
+---
+
+##  Architecture
+
 ```bash
                 +--------------------+
                 |    Client (User)   |
@@ -37,48 +41,84 @@ It is designed to meet the following business requirements:
 |                   |          |  - Captures stdout |
 +-------------------+          +--------------------+
 ```
-**API Service (Flask)**
 
-* Handles /health and /execute endpoints.
-* Validates scripts (syntax, presence of main(), disallowed imports).
+### **API Service (Flask)**
+
+* Handles `/health` and `/execute` endpoints.
+* Validates scripts (syntax, presence of `main()`, disallowed imports).
 * Delegates execution to the sandbox.
 
-## Sandbox Runner (nsjail)
+### **Sandbox Runner (nsjail)**
 
 * Executes script safely in an isolated environment.
 * Restricts CPU, memory, and networking.
 * Ensures malicious scripts cannot escape.
 
-## Running Locally
+---
 
-1. Install Requirements (API or Sandbox)
+## ⚙️ Running Locally
+
+1. Install dependencies:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. Run the API:
+
+   ```bash
+   export FLASK_APP=sandbox.runner:app
+   flask run --host=0.0.0.0 --port=8080
+   ```
+
+API will be available at: [http://localhost:8080](http://localhost:8080)
+
+---
+
+## 🐳 Running with Docker
+
+**Build & Start Service**
+
 ```bash
-pip install -r requirements.txt
+docker build -t sandbox-runner .
+docker run -p 8080:8080 sandbox-runner
 ```
-2. Run API Service Locally
+
+API service → [http://localhost:8080](http://localhost:8080)
+
+---
+
+##  Deploying to Google Cloud Run
+
 ```bash
-python -m api.main
+gcloud run deploy sandbox-api \
+  --source . \
+  --platform managed \
+  --region us-central1 \
+  --allow-unauthenticated
 ```
 
-API will be available at: http://localhost:8080
+Example request after deployment:
 
-## Running with Docker
-**Build & Start Services**
 ```bash
-docker-compose up --build
+curl -X POST https://<YOUR-CLOUD-RUN-URL>/execute \
+  -H "Content-Type: application/json" \
+  -d '{"script": "def main():\n    return {\"msg\": \"Hello from Cloud Run\"}"}'
 ```
 
-API service → http://localhost:8080
-
-Sandbox runner → http://sandbox:8081
-
+---
 
 ## Example Usage
-**Health Check**
+
+### Health Check
+
 ```bash
 curl -X GET http://localhost:8080/health
+```
 
-Execute Script
+### Execute Script
+
+```bash
 curl -X POST http://localhost:8080/execute \
   -H "Content-Type: application/json" \
   -d '{
@@ -86,8 +126,9 @@ curl -X POST http://localhost:8080/execute \
   }'
 ```
 
-## Expected Response:
-```bash
+### Expected Response
+
+```json
 {
   "result": { "message": "success" },
   "stdout": "hello from sandbox",
@@ -95,47 +136,78 @@ curl -X POST http://localhost:8080/execute \
 }
 ```
 
-## Testing
-* Unit Tests
-* Tests are placed under tests/ and include:
-* Validation tests
-* Missing main() function → should return error
-* Use of eval/exec → should be rejected
-* Oversized scripts (>200KB) → should be rejected
-* Execution tests
-* main() returns JSON → valid result
-* main() raises exception → returns error
-* Script prints to stdout → output captured
+---
 
-## Run Tests
+##  Testing
+
+Unit tests are included under `tests/` and cover:
+
+* **Validation tests**
+
+  * Missing `main()` function → should return error.
+  * Use of `eval`/`exec` → should be rejected.
+  * Oversized scripts (>200KB) → should be rejected.
+
+* **Execution tests**
+
+  * `main()` returns JSON → valid result.
+  * `main()` raises exception → error returned.
+  * Script prints to stdout → output captured.
+
+Run tests with:
+
 ```bash
 pytest -v
 ```
-## Edge Cases Considered
 
-* No main() function
-* def foo(): return {"x": 1}
-→ Error: script must define main().
-* Invalid JSON return
-* def main(): return set([1, 2])
-→ Error: "Returned value is not valid JSON".
-* Malicious code attempt
-```bash
-import os
-def main(): os.system("rm -rf /")
-```
-→ Blocked by validation & nsjail.
-* Infinite loop
-def main():
-    while True: pass
+---
 
-→ Terminated by nsjail timeout.
+## ⚡ Edge Cases Considered
 
-Large script size (>200KB)
-→ Rejected at validation step.
+* **No `main()` function**
+
+  ```python
+  def foo(): return {"x": 1}
+  ```
+
+  → Error: `script must define main()`
+
+* **Invalid JSON return**
+
+  ```python
+  def main(): return set([1, 2])
+  ```
+
+  → Error: `"Returned value is not valid JSON"`
+
+* **Malicious code attempt**
+
+  ```python
+  import os
+  def main(): os.system("rm -rf /")
+  ```
+
+  → Blocked by validation & nsjail
+
+* **Infinite loop**
+
+  ```python
+  def main():
+      while True: pass
+  ```
+
+  → Terminated by nsjail timeout
+
+* **Large script size (>200KB)**
+  → Rejected at validation step
+
+---
 
 ## Development Notes
 
-* Modular code: API logic, validation, and sandbox execution are decoupled.
-* Sandbox isolation: nsjail ensures execution is safe even if validation is bypassed.
-* Production-ready: Small Docker images, simple docker run startup, and Cloud Run compatible.
+* **Modular code** → API logic, validation, and sandbox execution are decoupled.
+* **Sandbox isolation** → nsjail ensures execution is safe even if validation is bypassed.
+* **Production-ready** → Small Docker image, `docker run` startup, and Cloud Run compatible.
+* **Benchmark time** → Approx. 5–6 hours including design, coding, testing, and documentation.
+
+---
