@@ -1,6 +1,7 @@
-# 🐍 Python Script Execution Service
+````markdown
+# Python Script Execution Service
 
-## 📌 Overview
+## Overview
 
 This project provides a **secure API service** that allows clients to submit arbitrary Python scripts and receive the result of the `main()` function execution.  
 It is designed to meet the following business requirements:
@@ -21,7 +22,7 @@ It is designed to meet the following business requirements:
 
 ---
 
-##  Architecture
+## Architecture
 
 ```bash
                 +--------------------+
@@ -56,26 +57,36 @@ It is designed to meet the following business requirements:
 
 ---
 
-## ⚙️ Running Locally
+## How to Run
 
-1. Install dependencies:
+### 1. Run Locally (Flask Dev Server)
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+Install dependencies:
 
-2. Run the API:
+```bash
+pip install -r requirements.txt
+```
 
-   ```bash
-   export FLASK_APP=sandbox.runner:app
-   flask run --host=0.0.0.0 --port=8080
-   ```
+Run the API using Flask:
 
-API will be available at: [http://localhost:8080](http://localhost:8080)
+```bash
+export FLASK_APP=sandbox.runner:app
+flask run --host=0.0.0.0 --port=8080
+```
+
+API available at → [http://localhost:8080](http://localhost:8080)
 
 ---
 
-## 🐳 Running with Docker
+### 2. Run Locally (Gunicorn, Production-style)
+
+```bash
+gunicorn -w 2 -b 0.0.0.0:8080 sandbox.runner:app
+```
+
+---
+
+### 3. Run with Docker
 
 **Build & Start Service**
 
@@ -84,11 +95,9 @@ docker build -t sandbox-runner .
 docker run -p 8080:8080 sandbox-runner
 ```
 
-API service → [http://localhost:8080](http://localhost:8080)
-
 ---
 
-##  Deploying to Google Cloud Run
+### 4. Deploy to Google Cloud Run
 
 ```bash
 gcloud run deploy sandbox-api \
@@ -108,7 +117,7 @@ curl -X POST https://<YOUR-CLOUD-RUN-URL>/execute \
 
 ---
 
-## Example Usage
+##  Example Usage
 
 ### Health Check
 
@@ -210,4 +219,4 @@ pytest -v
 * **Production-ready** → Small Docker image, `docker run` startup, and Cloud Run compatible.
 * **Benchmark time** → Approx. 5–6 hours including design, coding, testing, and documentation.
 
----
+```
